@@ -1,0 +1,256 @@
+---
+title: "15.819 - Recitation 4"
+author: ""
+date: "04/03/2020"
+output: 
+    pdf_document:
+      number_sections: true
+      fig_width: 5
+      fig_height: 4 
+---
+
+# Introduction
+
+This is the fourth recitation for 15.819 Marketing Analytics. We will discuss the following:
+
+1. Counterfactual policy learning
+2. Evaluating your policies
+3. The dangers of overfitting
+
+
+## Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+```{r install}
+# set working directory
+# setwd("~/Google Drive/MIT/Teaching/15.819-Sp2020/Recitations/R04")
+
+# Installing and loading R packages/libraries
+# 1. data handling, processing, and visualization
+if (!require(tidyverse)) install.packages("tidyverse")
+library(tidyverse) # load library to access functions
+options(tibble.width = Inf) # print options
+
+# penalized regression
+if (!require(glmnet)) install.packages("glmnet")
+library(glmnet)
+
+# balance tables
+if (!require(cobalt)) install.packages("cobalt")
+library(cobalt)
+```
+
+## Predictive Inference vs Causal Inference
+
+In the previous assignment, we were looking at predictive modeling: given some covariates X, could we predict some target variable y. The tools we learned for predictive modeling allows us to predict out of sample data points. From our regression coefficients, we can even tell which covariates were important for our predictions. 
+
+However, this type of analysis does not let us reason about how some intervention might affect our outcome variable. This is a job for causal inference! For this analysis, we typically analyze a randomized experiment.
+
+```{r}
+all.df = read_csv("turnout_train.csv")
+head(all.df)
+```
+
+We can then calculate the ATE of this experiment by running a simple regression. The ATE is just equal to the coefficient of 'treat'. 
+
+```{r}
+model <- lm(voted_2014 ~ treat, data = all.df)
+summary(model)
+```
+
+We see that the ATE is 0.051. Whenever we treat the user, we can expect on average an increase of 5.1% chance of voting in 2014. Howevever, we notice a fatal flaw in this analysis; we can't use this model to target users! This is a model that only gives us a homogenous treatment effect. 
+
+If the above version of the ATE was confusing, we can verify that it is just the same as the difference in means of the treatment and control groups:
+
+```{r}
+mean(all.df$voted_2014[which(all.df$treat==1)]) - mean(all.df$voted_2014[which(all.df$treat==0)])
+```
+
+
+## Heterogenous Treatment Effects
+
+We instead would like to have our model give us a treatment effect specific to each user (based on other pre-treatment covariates). There are many ways to train such a model (and is even an active area of research). The simplest way (as discussed in the Assignment 3 starter code) is to train a model on the units assigned to treatment, train another model on the units assiged to control. Then for any unit we wish to predict their treatment effect, we can take the difference of our two models to get our heterogenous treatment effects. 
+
+Before we begin, whenever we train any sort of machine learning model, be sure to do a train/test split!
+```{r split}
+# ==========================================
+# split train-val
+# ==========================================
+
+# create indicator variable for training/validation
+set.seed(134) # set seed for reproducibility
+all.df$train_split = sample(c("train", "test"), size = nrow(all.df), prob = c(0.7, 0.3), replace = TRUE)
+table(all.df$train_split)
+
+# split training and validation data
+train = all.df %>% 
+  filter(train_split == "train")
+print(dim(train))
+
+test = all.df %>% 
+  filter(train_split == "test")
+print(dim(test))
+```
+
+Here, we train the two models:
+```{r}
+# model matrix for all data
+mm.train <- sparse.model.matrix(
+   ~ 0 + voted_2006 + voted_2008 + voted_2009 + voted_2010 + voted_2011 + voted_2012 + voted_2013 + i_age + black + hispanic + white + female + married,
+  data = train
+)
+
+# fit model for treated voters
+glmnet.1 <- cv.glmnet(
+  mm.train[train$treat == 1,],
+  train$voted_2014[train$treat == 1],
+  family = "binomial",
+  alpha = 0,
+  nfolds = 5,
+  lambda = NULL
+)
+
+# fit model for control voters
+glmnet.0 <- cv.glmnet(
+  mm.train[train$treat == 0,],
+  train$voted_2014[train$treat == 0],
+  family = "binomial",
+  alpha = 0,
+  nfolds = 5,
+  lambda = NULL
+)
+
+```
+For more reading on the alpha term: https://web.stanford.edu/~hastie/glmnet/glmnet_alpha.html
+
+We get both predictions for all voters in test:
+```{r}
+# model matrix for all data
+mm.test <- sparse.model.matrix(
+   ~ 0 + voted_2006 + voted_2008 + voted_2009 + voted_2010 + voted_2011 + voted_2012 + voted_2013 + i_age + black + hispanic + white + female + married,
+  data = test
+)
+
+y1.hat <- predict(
+  glmnet.1, newx = mm.test,
+  type = "response", s = glmnet.1$lambda.1se
+)[,1]
+
+y0.hat <- predict(
+  glmnet.0, newx = mm.test,
+  type = "response", s = glmnet.0$lambda.1se
+)[,1]
+
+```
+
+## Key Assumptions
+There are two key assumptions we make when using such a model. 
+
+1. Conditional Ignorability 
+
+In order to calculate the ATE of a randomized experiment, we typically have the ignorability assumption (the treatment assignment is independent from the outcome i.e $Y_i(0), Y_i(1) \perp D_i$). This allows us to calcualte the $ATE = E[Y_i(1)] - E[Y_i(0)]$. 
+
+Now, we train two separate models that gives us the treatment effect for a specific set of covariates. Implicitly we are using the ignorability assumption conditioned on your covariates $Y_i(0), Y_i(1) \perp D_i | X_i = x_i$. In other words, among the units with identical values of $X_i$, $D_i$ is “as-if” randomly assigned.
+
+2. Common Support
+
+$0 < Pr(D_i=1| X_i=x) < 1 \forall x$
+Essentially, this is just saying that for unit with covariates $X_i$, the unit could have either received treatment or control.
+
+This is saying that you are hopefully training on like users in both the treated and control users, otherwise you should not trust the results of your model. For example, if all men were randomized into control and all women were randomized into treatment.
+
+A common way to test whether these conditions hold is using a balance test, which tells us whether the distribution of covariates is the same in the treatment and control groups. There are some R packages that automatically does this for you: https://cran.r-project.org/web/packages/cobalt/vignettes/cobalt_A0_basic_use.html
+
+```{r}
+bal.tab(treat ~ voted_2006 + i_age + black + married, data=test)
+```
+
+
+## Counterfactual Policy Learning
+
+Now given our estimated treatment effects, how can we learn a treatment policy?
+
+```{r}
+cost = 0.0053
+treatment_effect <- y1.hat - y0.hat
+treat <- treatment_effect > cost
+```
+
+Easy! We just assign the units whose effect size is larger than our cost. 
+
+We can also plot our treatment effects to verify it is correct.
+```{r}
+hist(treatment_effect)
+```
+
+
+## Evaluating our policy
+Now let's evaluate how good this policy is.
+
+In a prediction problem (like assignment 2), you evaluate your model (using your test set) by comparing your predictions to the actual outcome variables.
+
+When evaluating a policy, this is not so simple. Each unit can be assigned to treatment or control, however in our test set, we only ever observe one of these outcomes. The easy work-around is to only evaluate on the units that happen to coincide with your policy's assignments. 
+
+```{r}
+coincide.with.treat <- test[which(test$treat == treat),]
+mean(coincide.with.treat$voted_2014)
+```
+Great! It looks like our policy causes 48% of people to vote, so we're done right? No! Instead we should compare our policy against some baseline policies (treat everyone, treat no one, treat only those that voted in 2012).
+
+```{r}
+# Treat no one
+coincide.with.treat.none <- test[which(test$treat == 1),]
+mean(coincide.with.treat.none$voted_2014)
+```
+
+```{r}
+# Treat those that voted in 2012
+coincide.with.2012 <- test[which(test$i_age < 35),]
+mean(coincide.with.2012$voted_2014)
+```
+
+Once you're satisfied, you can run your model and assign the units for your kaggle submission.
+```{r}
+out.df = read_csv("turnout_to_assign.csv")
+head(out.df)
+```
+
+```{r}
+mm.out <- sparse.model.matrix(
+   ~ 0 + voted_2006 + voted_2008 + voted_2009 + voted_2010 + voted_2011 + voted_2012 + voted_2013 + i_age + black + hispanic + white + female + married,
+  data = out.df
+)
+
+y1.hat.out <- predict(
+  glmnet.1, newx = mm.out,
+  type = "response", s = glmnet.1$lambda.1se
+)[,1]
+
+y0.hat.out <- predict(
+  glmnet.0, newx = mm.out,
+  type = "response", s = glmnet.0$lambda.1se
+)[,1]
+
+treatment_effect.out <- y1.hat.out - y0.hat.out
+treat.out <- treatment_effect.out > cost
+```
+
+Now we can submit!
+```{r}
+out.df$treat <- as.integer(treat.out)
+readr::write_csv(out.df[c("id", "treat")], "output.csv")
+```
+
+For fun, you can submit some simple policies like treat on those that voted in 2012, to see how well that does on kaggle.
+```{r}
+out.df$treat <- out.df$voted_2012
+readr::write_csv(out.df[c("id", "treat")], "output_2012.csv")
+```
+
+## Overfitting
+
+As many of you experienced in the last assignment, it is really easy to overfit to the leaderboard. The main way to prevent this is to use the train/test split we have done above. When you tune the parameters of your logistic regression (alpha and lambda), you should only evaluate / iterate on those results with the test set. DO NOT change your parameters based on the results from the kaggle leaderboard.
+

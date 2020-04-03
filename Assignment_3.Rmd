@@ -44,6 +44,9 @@ You have data from a large field experiment spanning multiple U.S. states conduc
 Let's load the data:
 ```{r}
 d <- readr::read_csv("turnout_train.csv")
+
+# Dave: the table has 1M entries. I'm trying to use only a portion of it to make
+#       calculation time reasonable. Assuming 100-200K is enough to train
 set.seed(144)
 split = createDataPartition(d$treat, p = 0.2, list = FALSE)
 d <- d[split,]
@@ -51,6 +54,7 @@ d <- d[split,]
 
 For now we will just create two variables that could be helpful here.
 ```{r}
+# Dave: Removing states in which everybody was treated
 d <- d %>%
     group_by(state) %>%
     mutate(
@@ -80,12 +84,18 @@ We can predict whether they will vote if in treatment and whether they will vote
 One simple way to do this is simply by fitting the same predictive model separately to the treatment and control data. That's what we will illustrate here as your starting point.
 
 ```{r}
+# Dave: This is the point to test different formulas. NOTE that there's a diff between adding variables (+)
+#       and multiplying them (*). Multiplication gives better results, but take too much time to calculate.
+
 # model matrix for all data
 form = ~ 0 + voted_2006 * voted_2010 * voted_2012 * voted_2013 * state * white * female + hispanic + black + i_age 
 mm.1 <- sparse.model.matrix(
    form
   ,data = d.exp
 )
+
+# Dave: Here is the point where we train the model. Can play with all different arguments (alpha, lambda, nfolds)
+#       May try also other ways such as Random Forests.
 
 # fit model for treated voters
 ptm = proc.time()
@@ -99,7 +109,6 @@ glmnet.1 <- cv.glmnet(
 )
 proc.time() - ptm
 
-glmnet.1$lambda
 glmnet.1$lambda.min
 glmnet.1$lambda.se
 ```
@@ -117,7 +126,6 @@ glmnet.0 <- cv.glmnet(
 )
 proc.time() - ptm
 
-glmnet.0$lambda
 glmnet.0$lambda.min
 glmnet.0$lambda.se
 
@@ -128,7 +136,7 @@ You should then do many of the same diagnostics etc. you've done before. We are 
 
 We get both predictions for all voters:
 ```{r}
-# ugly trick needed because "ta" dousn't have TX & AK
+# Dave: ugly trick needed because "ta" dousn't have TX & AK
 ta1 = ta
 x = ta1[1,]
 x$state = "TX"

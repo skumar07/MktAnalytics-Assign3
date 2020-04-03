@@ -1,0 +1,184 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+# Assignment 3
+In this assignment, we will combine our knowledge of randomized experimentation, predictive modeling, and learning targeting policies to decide which registered voters to assign to a get-out-the-vote intervention.
+
+```{r, message=FALSE, results='hide'}
+library(glmnet)
+library(dplyr)
+library(Hmisc)
+library(lubridate)
+library(ggplot2)
+library(readr)
+library(broom)
+
+library(caret)
+theme_set(theme_bw())
+options(digits = 5)
+ptm <- proc.time()
+```
+
+## The treatment
+This is a ``social pressure'' intervention in which the person receives a mailing showing their own history of voting in recent elections, that of their neighbors, and a comparison with the median voting frequency in their state. We discussed this as an example earlier in class.
+
+This treatment costs approximately $0.80, so we want to use it when it will sufficiently increase someone's chance of voting.
+
+## Outside option
+When deciding whether to spend 80 cents to treat someone, we should have in mind what else we might do with that money. For example, maybe we could instead use this to text message voters? Or call them? Or send door-to-door canvassers. We can make this comparison by looking at dollars-per-incremental-vote for various treatments. Simplifying a bit (but keeping this pretty realistic), we will assume that we have an outside option that on average yields one incremental vote per $150 spent. 
+
+Thus, we can easily compute what sized treatment effect (here the proportion of people, perhaps of some subgroup, is induced to vote by the mailer) is sufficient to decide to spend our money this way:
+```{r}
+mailer.cost <- .80
+outside.option.per.vote <- 150
+min.effect.to.treat <- mailer.cost / outside.option.per.vote
+min.effect.to.treat
+```
+This is just over 0.53 %age points. So we will try to treat only those households where we think the treatment effect is at least 0.005333.
+
+## Data
+You have data from a large field experiment spanning multiple U.S. states conducted for the 2014 midterm elections. We also have additional data about treated people from two states, but those states lack a randomized control group.
+
+Let's load the data:
+```{r}
+d <- readr::read_csv("turnout_train.csv")
+set.seed(144)
+split = createDataPartition(d$treat, p = 0.2, list = FALSE)
+d <- d[split,]
+```
+
+For now we will just create two variables that could be helpful here.
+```{r}
+d <- d %>%
+    group_by(state) %>%
+    mutate(
+        p_treat = mean(treat),
+        randomized = (p_treat != 1)
+    ) %>% ungroup()
+d.exp <- d %>% filter(randomized)
+```
+
+The probability of treatment is always large, reflecting our belief that this intervention works on average. Wait, does it work on average? Let's do a simple analysis of average treatment effects by state.
+
+## Evaluation households
+We have a second set of households for which we want to assign treatment.
+
+These households were part of the same field experiment, so we know whether they were treated and whether they voted, which will be used to evaluate your targeting policies (explained further below). 
+
+```{r}
+ta <- readr::read_csv("turnout_to_assign.csv")
+```
+
+
+## Modeling to target
+How will we decide who to target with this mailer?
+
+We can predict whether they will vote if in treatment and whether they will vote if not treated. If the difference between these predictions is large enough, then we will treat them.
+
+One simple way to do this is simply by fitting the same predictive model separately to the treatment and control data. That's what we will illustrate here as your starting point.
+
+```{r}
+# model matrix for all data
+form = ~ 0 + voted_2006 * voted_2010 * voted_2012 * voted_2013 * state * white * female + hispanic + black + i_age 
+mm.1 <- sparse.model.matrix(
+   form
+  ,data = d.exp
+)
+
+# fit model for treated voters
+ptm = proc.time()
+glmnet.1 <- cv.glmnet(
+  mm.1[d.exp$treat == 1,],
+  d.exp$voted_2014[d.exp$treat == 1],
+  family = "binomial",
+  alpha = 0.5,
+  nfolds = 10,
+  lambda = seq(0, .002, by=.0001)
+)
+proc.time() - ptm
+
+glmnet.1$lambda
+glmnet.1$lambda.min
+glmnet.1$lambda.se
+```
+
+```{r}
+# fit model for control voters
+ptm = proc.time()
+glmnet.0 <- cv.glmnet(
+  mm.1[d.exp$treat == 0,],
+  d.exp$voted_2014[d.exp$treat == 0],
+  family = "binomial",
+  alpha = 0.5,
+  nfolds = 10,
+  lambda = seq(0, .004, by=.0002) 
+)
+proc.time() - ptm
+
+glmnet.0$lambda
+glmnet.0$lambda.min
+glmnet.0$lambda.se
+
+```
+
+You should then do many of the same diagnostics etc. you've done before. We are just going to jump directly to getting predictions from these models. 
+
+
+We get both predictions for all voters:
+```{r}
+# ugly trick needed because "ta" dousn't have TX & AK
+ta1 = ta
+x = ta1[1,]
+x$state = "TX"
+ta1 = rbind(x, ta1)
+x$state = "AK"
+ta1 = rbind(x, ta1)
+
+mm.2 <- sparse.model.matrix(
+   form
+  ,data = ta1
+)
+ta1$y.1.hat <- predict(
+  glmnet.1, newx = mm.2,
+  type = "response", s = glmnet.1$lambda.1se
+)[,1]
+
+ta1$y.0.hat <- predict(
+  glmnet.0, newx = mm.2,
+  type = "response", s = glmnet.0$lambda.1se
+)[,1]
+
+# unroll ugly trick
+ta1 = ta1 %>% filter(state != "TX" & state != "AK")
+```
+
+Now we can combine those predictions to get an estimated effect per voter and, for convenience, a version net of opportunity cost of using this money for this intervention rather than another:
+```{r}
+ta1 <- ta1 %>%
+  mutate(
+    effect.hat = y.1.hat - y.0.hat,
+    effect.hat.net = effect.hat - min.effect.to.treat,
+    should.treat = effect.hat.net > 0
+  )
+
+```
+
+
+
+## Rolling out your targeting (and uploading to Kaggle)
+
+
+```{r}
+output <- ta1 %>%
+    ungroup() %>%
+    mutate(treat = as.integer(should.treat)) %>%
+    select(id, treat)
+```
+
+Now we can write our targeting choices to a file to upload to Kaggle.
+```{r}
+readr::write_csv(output, "turnout_targeting_example_output.csv")
+```
+

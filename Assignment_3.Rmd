@@ -139,8 +139,6 @@ We get both predictions for all voters:
 # Dave: ugly trick needed because "ta" dousn't have TX & AK
 ta1 = ta
 x = ta1[1,]
-x$state = "TX"
-ta1 = rbind(x, ta1)
 x$state = "AK"
 ta1 = rbind(x, ta1)
 

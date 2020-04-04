@@ -454,7 +454,7 @@ d.exp &lt;- d %&gt;% filter(randomized)</code></pre>
 #       and multiplying them (*). Multiplication gives better results, but take too much time to calculate.
 
 # model matrix for all data
-form = ~ 0 + voted_2006 + voted_2010 + voted_2012 + voted_2013 + state + white + female + hispanic + black + i_age + voting_below + voting_average + voting_above 
+form = ~ 0 + voted_2006 * voted_2010 * voted_2012 * voted_2013 * state * white * female + hispanic + black + i_age + voting_below + voting_average + voting_above 
 mm.1 &lt;- sparse.model.matrix(
    form
   ,data = d.exp
@@ -475,9 +475,9 @@ glmnet.1 &lt;- cv.glmnet(
 )
 proc.time() - ptm</code></pre>
 <pre><code>##    user  system elapsed 
-##   17.78    0.44   18.25</code></pre>
+##  168.72    2.20  171.94</code></pre>
 <pre class="r"><code>glmnet.1$lambda.min</code></pre>
-<pre><code>## [1] 2e-04</code></pre>
+<pre><code>## [1] 6e-04</code></pre>
 <pre class="r"><code>glmnet.1$lambda.se</code></pre>
 <pre><code>## NULL</code></pre>
 <pre class="r"><code># fit model for control voters
@@ -492,9 +492,9 @@ glmnet.0 &lt;- cv.glmnet(
 )
 proc.time() - ptm</code></pre>
 <pre><code>##    user  system elapsed 
-##    1.12    0.00    1.12</code></pre>
+##   33.24    0.10   33.46</code></pre>
 <pre class="r"><code>glmnet.0$lambda.min</code></pre>
-<pre><code>## [1] 0.0034</code></pre>
+<pre><code>## [1] 0.004</code></pre>
 <pre class="r"><code>glmnet.0$lambda.se</code></pre>
 <pre><code>## NULL</code></pre>
 <p>You should then do many of the same diagnostics etc. you’ve done before. We are just going to jump directly to getting predictions from these models.</p>
